@@ -207,87 +207,116 @@ with card3:
 # 포스터와 외부 감상평은 KOBIS 응답에 포함되지 않으므로 TMDB를 사용합니다.
 # Streamlit Cloud Secrets에 TMDB_KEY를 등록하면 이 기능이 활성화됩니다.
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
-def get_movie_extras(movie_name, release_date, tmdb_key):
-    """TMDB에서 영화 포스터와 공개된 사용자 감상평을 찾아옵니다."""
+def get_movie_extras(movie_name, release_date, tmdb_key, naver_client_id, naver_client_secret):
+    """TMDB 포스터/리뷰를 먼저 찾고, 리뷰가 없으면 네이버 블로그 검색으로 보완합니다."""
     result = {
         "poster": "",
         "review": "",
         "review_author": "",
         "review_url": "",
         "source_url": "https://www.themoviedb.org/",
+        "review_source": "",
     }
-    if not tmdb_key:
-        return result
 
-    headers = {"accept": "application/json"}
-    search_url = "https://api.themoviedb.org/3/search/movie"
-    search_params = {
-        "api_key": tmdb_key,
-        "query": movie_name,
-        "language": "ko-KR",
-        "include_adult": "false",
-    }
-    # 개봉일이 있으면 검색 결과를 더 잘 고를 수 있도록 연도도 전달합니다.
-    if release_date:
+    # 1) TMDB에서 포스터와 공개 사용자 리뷰를 찾습니다.
+    if tmdb_key:
+        headers = {"accept": "application/json"}
+        search_url = "https://api.themoviedb.org/3/search/movie"
+        search_params = {
+            "api_key": tmdb_key,
+            "query": movie_name,
+            "language": "ko-KR",
+            "include_adult": "false",
+        }
+        if release_date:
+            try:
+                search_params["year"] = int(release_date[:4])
+            except (ValueError, TypeError):
+                pass
+
         try:
-            search_params["year"] = int(release_date[:4])
-        except (ValueError, TypeError):
-            pass
-
-    try:
-        search_response = requests.get(
-            search_url, params=search_params, headers=headers, timeout=8
-        )
-        search_response.raise_for_status()
-        search_data = search_response.json()
-        results = search_data.get("results", [])
-        if not results:
-            # 한국어 검색에서 결과가 없으면 언어 설정 없이 한 번 더 검색합니다.
-            search_params.pop("language", None)
             search_response = requests.get(
                 search_url, params=search_params, headers=headers, timeout=8
             )
             search_response.raise_for_status()
             results = search_response.json().get("results", [])
+            if not results:
+                search_params.pop("language", None)
+                search_response = requests.get(
+                    search_url, params=search_params, headers=headers, timeout=8
+                )
+                search_response.raise_for_status()
+                results = search_response.json().get("results", [])
 
-        if not results:
-            return result
+            if results:
+                tmdb_movie = results[0]
+                movie_id = tmdb_movie.get("id")
+                poster_path = tmdb_movie.get("poster_path")
+                if poster_path:
+                    result["poster"] = "https://image.tmdb.org/t/p/w500" + poster_path
+                if movie_id:
+                    result["source_url"] = f"https://www.themoviedb.org/movie/{movie_id}"
+                    reviews_url = f"https://api.themoviedb.org/3/movie/{movie_id}/reviews"
+                    reviews_response = requests.get(
+                        reviews_url,
+                        params={"api_key": tmdb_key, "language": "en-US", "page": 1},
+                        headers=headers,
+                        timeout=8,
+                    )
+                    reviews_response.raise_for_status()
+                    for review in reviews_response.json().get("results", []):
+                        content = (review.get("content") or "").strip()
+                        if content:
+                            result["review"] = content[:650]
+                            result["review_author"] = (
+                                (review.get("author_details") or {}).get("name")
+                                or review.get("author") or "TMDB 사용자"
+                            )
+                            result["review_url"] = review.get("url", "") or result["source_url"]
+                            result["review_source"] = "TMDB 사용자 리뷰"
+                            break
+        except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
+            # TMDB에 문제가 있어도 네이버 검색을 계속 시도합니다.
+            pass
 
-        # 제목 검색 결과의 첫 번째 영화를 사용합니다.
-        tmdb_movie = results[0]
-        movie_id = tmdb_movie.get("id")
-        poster_path = tmdb_movie.get("poster_path")
-        if poster_path:
-            result["poster"] = "https://image.tmdb.org/t/p/w500" + poster_path
-        if movie_id:
-            result["source_url"] = f"https://www.themoviedb.org/movie/{movie_id}"
-            reviews_url = f"https://api.themoviedb.org/3/movie/{movie_id}/reviews"
-            reviews_response = requests.get(
-                reviews_url,
-                params={"api_key": tmdb_key, "language": "en-US", "page": 1},
-                headers=headers,
+    # 2) TMDB 리뷰가 없으면 네이버 블로그 검색 결과의 요약문을 사용합니다.
+    # 네이버 API는 블로그 글 전문이 아니라 검색 결과 요약문을 제공합니다.
+    if not result["review"] and naver_client_id and naver_client_secret:
+        try:
+            naver_response = requests.get(
+                "https://openapi.naver.com/v1/search/blog.json",
+                headers={
+                    "X-Naver-Client-Id": naver_client_id,
+                    "X-Naver-Client-Secret": naver_client_secret,
+                },
+                params={
+                    "query": f'"{movie_name}" 영화 리뷰 감상평',
+                    "display": 10,
+                    "sort": "sim",
+                },
                 timeout=8,
             )
-            reviews_response.raise_for_status()
-            reviews = reviews_response.json().get("results", [])
+            naver_response.raise_for_status()
+            items = naver_response.json().get("items", [])
+            if items:
+                # HTML 태그를 제거하고 검색 결과의 요약문을 표시합니다.
+                import re
+                from html import unescape
 
-            # TMDB에 등록된 감상평 중 내용이 있는 첫 번째 항목을 사용합니다.
-            for review in reviews:
-                content = (review.get("content") or "").strip()
-                if content:
-                    result["review"] = content[:650]
-                    result["review_author"] = (
-                        (review.get("author_details") or {}).get("name")
-                        or review.get("author")
-                        or "TMDB 사용자"
-                    )
-                    result["review_url"] = review.get("url", "") or result["source_url"]
-                    break
+                for item in items:
+                    snippet = unescape(re.sub(r"<[^>]+>", "", item.get("description", ""))).strip()
+                    title = unescape(re.sub(r"<[^>]+>", "", item.get("title", ""))).strip()
+                    if snippet:
+                        result["review"] = snippet[:650]
+                        result["review_author"] = item.get("bloggername", "네이버 블로그")
+                        result["review_url"] = item.get("link", "")
+                        result["review_source"] = f"네이버 블로그 검색 · {title}" if title else "네이버 블로그 검색"
+                        break
+        except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
+            pass
 
-    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
-        # 포스터/감상평 서비스가 실패해도 박스오피스 앱 전체는 계속 동작합니다.
-        pass
-
+    if result["review_source"].startswith("네이버"):
+        result["source_url"] = result["review_url"] or "https://search.naver.com/"
     return result
 
 
@@ -303,28 +332,32 @@ st.caption(
 top5 = df.nlargest(5, "관객수").copy().sort_values("관객수", ascending=True)
 
 tmdb_key = get_secret("TMDB_KEY")
+naver_client_id = get_secret("NAVER_CLIENT_ID")
+naver_client_secret = get_secret("NAVER_CLIENT_SECRET")
 movie_extras = {}
-if tmdb_key:
-    with st.spinner("상위 5편의 포스터와 감상평을 확인하는 중입니다..."):
-        for _, movie in top5.iterrows():
-            name = str(movie["원본영화명"])
-            movie_extras[name] = get_movie_extras(
-                name, str(movie["개봉일"]), tmdb_key
-            )
-else:
-    for _, movie in top5.iterrows():
-        movie_extras[str(movie["원본영화명"])] = {
-            "poster": "",
-            "review": "",
-            "review_author": "",
-            "review_url": "",
-            "source_url": "https://www.themoviedb.org/",
-        }
+
+if not tmdb_key:
     st.info(
-        "포스터와 감상평을 표시하려면 Streamlit Cloud의 Secrets에 "
-        '`TMDB_KEY = "TMDB_API_키"`를 추가해 주세요. '
-        "TMDB_KEY가 없어도 박스오피스 그래프와 나머지 기능은 그대로 작동합니다."
+        "포스터를 가져오려면 Secrets에 TMDB_KEY를 등록해 주세요. "
+        "TMDB 리뷰가 없을 때 네이버 리뷰 검색을 사용하려면 "
+        "NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET도 등록해야 합니다."
     )
+elif not (naver_client_id and naver_client_secret):
+    st.info(
+        "TMDB에 감상평이 없으면 네이버 블로그 검색으로 보완할 수 있습니다. "
+        "이를 사용하려면 Secrets에 NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET을 추가해 주세요."
+    )
+
+with st.spinner("상위 5편의 포스터와 감상평을 확인하는 중입니다..."):
+    for _, movie in top5.iterrows():
+        name = str(movie["원본영화명"])
+        movie_extras[name] = get_movie_extras(
+            name,
+            str(movie["개봉일"]),
+            tmdb_key,
+            naver_client_id,
+            naver_client_secret,
+        )
 
 # 마우스 오버 팝업에서 쓸 영화별 데이터를 준비합니다.
 hover_details = []
@@ -338,6 +371,7 @@ for _, movie in top5.iterrows():
         "review": extra.get("review", ""),
         "author": extra.get("review_author", ""),
         "review_url": extra.get("review_url", ""),
+        "review_source": extra.get("review_source", ""),
         "source_url": extra.get("source_url", "https://www.themoviedb.org/"),
     })
 
@@ -358,12 +392,13 @@ chart_html = r"""
       display:none; width:auto; max-width:100%; max-height:180px;
       object-fit:contain; border-radius:6px; margin:0 auto 10px;">
     <div id="movie-review-label" style="font-weight:700;margin:7px 0 4px;">감상평</div>
+    <div id="movie-review-source" style="font-size:11px;color:#666;margin-bottom:5px;"></div>
     <div id="movie-review" style="font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;"></div>
     <div id="movie-author" style="font-size:12px;color:#666;margin-top:7px;"></div>
     <a id="movie-review-link" href="#" target="_blank" rel="noopener noreferrer"
        style="display:none;font-size:12px;margin-top:8px;color:#1769aa;">원문 보기 ↗</a>
     <div id="movie-source-note" style="font-size:11px;color:#777;margin-top:8px;">
-      포스터·감상평 출처: TMDB
+      포스터: TMDB · 감상평: TMDB 또는 네이버 블로그 검색 결과 요약
     </div>
   </div>
 </div>
@@ -405,6 +440,7 @@ Plotly.newPlot("audience-chart", [trace], layout, {
   const poster = document.getElementById("movie-poster");
   const review = document.getElementById("movie-review");
   const author = document.getElementById("movie-author");
+  const reviewSource = document.getElementById("movie-review-source");
   const link = document.getElementById("movie-review-link");
 
   gd.on("plotly_hover", eventData => {
@@ -427,18 +463,21 @@ Plotly.newPlot("audience-chart", [trace], layout, {
     if (item.review) {
       review.textContent = "“" + item.review + "”";
       author.textContent = item.author ? "— " + item.author : "";
+      reviewSource.textContent = item.review_source || "감상평 검색 결과";
     } else {
-      review.textContent = "현재 TMDB에서 표시할 수 있는 공개 감상평을 찾지 못했습니다.";
+      review.textContent = "TMDB와 네이버에서 표시할 수 있는 감상평을 찾지 못했습니다.";
       author.textContent = "";
+      reviewSource.textContent = "";
     }
 
     if (item.review_url) {
       link.href = item.review_url;
+      link.textContent = "감상평 원문 보기 ↗";
       link.style.display = "inline-block";
     } else {
       link.href = item.source_url || "https://www.themoviedb.org/";
       link.style.display = "inline-block";
-      link.textContent = "TMDB에서 영화 정보 보기 ↗";
+      link.textContent = "영화 정보 보기 ↗";
     }
     card.style.display = "block";
   });
@@ -497,4 +536,4 @@ with st.expander("추가 정보: 상영횟수와 순위 변동"):
     extra_df["상영횟수"] = extra_df["상영횟수"].map(format_number)
     st.dataframe(extra_df, use_container_width=True, hide_index=True)
 
-st.caption("박스오피스 자료: 영화진흥위원회(KOBIS) · 포스터 및 감상평: TMDB")
+st.caption("박스오피스 자료: 영화진흥위원회(KOBIS) · 포스터: TMDB · 감상평: TMDB 또는 네이버 블로그 검색 결과")
