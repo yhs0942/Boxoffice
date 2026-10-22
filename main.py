@@ -19,6 +19,41 @@ st.set_page_config(
     layout="wide",
 )
 
+# 전체 화면에 영화관을 떠올리게 하는 어두운 그라데이션 배경과 카드 스타일을 적용합니다.
+st.markdown("""
+<style>
+.stApp {
+  background: radial-gradient(ellipse at 12% 0%, rgba(70, 92, 145, .28), transparent 36%),
+              radial-gradient(ellipse at 92% 18%, rgba(139, 67, 91, .22), transparent 32%),
+              linear-gradient(145deg, #10131d 0%, #171b29 48%, #10141e 100%);
+  color: #f3f4f8;
+}
+[data-testid="stHeader"] { background: rgba(16, 19, 29, .65); }
+[data-testid="stAppViewContainer"] .main .block-container {
+  padding-top: 2.1rem; padding-bottom: 3rem; max-width: 1250px;
+}
+h1, h2, h3 { color: #f7f8fc !important; letter-spacing: -.025em; }
+p, label, [data-testid="stCaptionContainer"] { color: #c5cada; }
+[data-testid="stMetric"] {
+  background: linear-gradient(135deg, rgba(39, 46, 67, .92), rgba(25, 30, 45, .92));
+  border: 1px solid rgba(160, 177, 220, .2); border-radius: 16px;
+  padding: 16px 18px; box-shadow: 0 8px 24px rgba(0,0,0,.16);
+}
+[data-testid="stMetricLabel"] { color: #b9c6e5 !important; }
+[data-testid="stMetricValue"] { color: #ffffff !important; }
+[data-testid="stVerticalBlockBorderWrapper"] {
+  border-color: rgba(160, 177, 220, .18) !important; border-radius: 16px;
+}
+[data-baseweb="select"] > div, [data-testid="stDateInput"] input {
+  background: rgba(28, 34, 51, .9); color: #f7f8fc; border-color: #414b67;
+}
+hr { border-color: rgba(160, 177, 220, .2); }
+[data-testid="stDataFrame"] {
+  border: 1px solid rgba(160, 177, 220, .2); border-radius: 12px; overflow: hidden;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("🎬 일별 박스오피스")
 st.caption("영화진흥위원회(KOBIS) API로 날짜별 영화 순위를 확인합니다.")
 
@@ -202,164 +237,68 @@ with card3:
 
 
 # --------------------------------------------------
-# 8. 영화 포스터와 감상평 조회 함수 (TMDB)
+# 8. 영화 포스터 조회 함수 (TMDB)
 # --------------------------------------------------
-# 포스터와 외부 감상평은 KOBIS 응답에 포함되지 않으므로 TMDB를 사용합니다.
-# Streamlit Cloud Secrets에 TMDB_KEY를 등록하면 이 기능이 활성화됩니다.
+# 포스터는 TMDB에서 가져오며, 감상평 조회 기능은 사용하지 않습니다.
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
-def get_movie_extras(movie_name, release_date, tmdb_key, naver_client_id, naver_client_secret):
-    """TMDB 포스터/리뷰를 먼저 찾고, 리뷰가 없으면 네이버 블로그 검색으로 보완합니다."""
-    result = {
-        "poster": "",
-        "review": "",
-        "review_author": "",
-        "review_url": "",
-        "source_url": "https://www.themoviedb.org/",
-        "review_source": "",
+def get_movie_poster(movie_name, release_date, tmdb_key):
+    """TMDB에서 영화 포스터와 영화 정보 링크만 가져옵니다."""
+    result = {"poster": "", "source_url": "https://www.themoviedb.org/"}
+    if not tmdb_key:
+        return result
+
+    search_url = "https://api.themoviedb.org/3/search/movie"
+    search_params = {
+        "api_key": tmdb_key,
+        "query": movie_name,
+        "language": "ko-KR",
+        "include_adult": "false",
     }
-
-    # 1) TMDB에서 포스터와 공개 사용자 리뷰를 찾습니다.
-    if tmdb_key:
-        headers = {"accept": "application/json"}
-        search_url = "https://api.themoviedb.org/3/search/movie"
-        search_params = {
-            "api_key": tmdb_key,
-            "query": movie_name,
-            "language": "ko-KR",
-            "include_adult": "false",
-        }
-        if release_date:
-            try:
-                search_params["year"] = int(release_date[:4])
-            except (ValueError, TypeError):
-                pass
-
+    if release_date:
         try:
-            search_response = requests.get(
-                search_url, params=search_params, headers=headers, timeout=8
-            )
-            search_response.raise_for_status()
-            results = search_response.json().get("results", [])
-            if not results:
-                search_params.pop("language", None)
-                search_response = requests.get(
-                    search_url, params=search_params, headers=headers, timeout=8
-                )
-                search_response.raise_for_status()
-                results = search_response.json().get("results", [])
-
-            if results:
-                tmdb_movie = results[0]
-                movie_id = tmdb_movie.get("id")
-                poster_path = tmdb_movie.get("poster_path")
-                if poster_path:
-                    result["poster"] = "https://image.tmdb.org/t/p/w500" + poster_path
-                if movie_id:
-                    result["source_url"] = f"https://www.themoviedb.org/movie/{movie_id}"
-                    reviews_url = f"https://api.themoviedb.org/3/movie/{movie_id}/reviews"
-                    reviews_response = requests.get(
-                        reviews_url,
-                        params={"api_key": tmdb_key, "language": "en-US", "page": 1},
-                        headers=headers,
-                        timeout=8,
-                    )
-                    reviews_response.raise_for_status()
-                    for review in reviews_response.json().get("results", []):
-                        content = (review.get("content") or "").strip()
-                        if content:
-                            result["review"] = content[:650]
-                            result["review_author"] = (
-                                (review.get("author_details") or {}).get("name")
-                                or review.get("author") or "TMDB 사용자"
-                            )
-                            result["review_url"] = review.get("url", "") or result["source_url"]
-                            result["review_source"] = "TMDB 사용자 리뷰"
-                            break
-        except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
-            # TMDB에 문제가 있어도 네이버 검색을 계속 시도합니다.
+            search_params["year"] = int(release_date[:4])
+        except (ValueError, TypeError):
             pass
 
-    # 2) TMDB 리뷰가 없으면 네이버 블로그 검색 결과의 요약문을 사용합니다.
-    # 네이버 API는 블로그 글 전문이 아니라 검색 결과 요약문을 제공합니다.
-    if not result["review"] and naver_client_id and naver_client_secret:
-        try:
-            naver_response = requests.get(
-                "https://openapi.naver.com/v1/search/blog.json",
-                headers={
-                    "X-Naver-Client-Id": naver_client_id,
-                    "X-Naver-Client-Secret": naver_client_secret,
-                },
-                params={
-                    "query": f'"{movie_name}" 영화 리뷰 감상평',
-                    "display": 10,
-                    "sort": "sim",
-                },
-                timeout=8,
-            )
-            naver_response.raise_for_status()
-            items = naver_response.json().get("items", [])
-            if items:
-                # HTML 태그를 제거하고 검색 결과의 요약문을 표시합니다.
-                import re
-                from html import unescape
-
-                for item in items:
-                    snippet = unescape(re.sub(r"<[^>]+>", "", item.get("description", ""))).strip()
-                    title = unescape(re.sub(r"<[^>]+>", "", item.get("title", ""))).strip()
-                    if snippet:
-                        result["review"] = snippet[:650]
-                        result["review_author"] = item.get("bloggername", "네이버 블로그")
-                        result["review_url"] = item.get("link", "")
-                        result["review_source"] = f"네이버 블로그 검색 · {title}" if title else "네이버 블로그 검색"
-                        break
-        except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
-            pass
-
-    if result["review_source"].startswith("네이버"):
-        result["source_url"] = result["review_url"] or "https://search.naver.com/"
+    try:
+        response = requests.get(search_url, params=search_params, timeout=8)
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if not results:
+            search_params.pop("language", None)
+            response = requests.get(search_url, params=search_params, timeout=8)
+            response.raise_for_status()
+            results = response.json().get("results", [])
+        if results:
+            movie = results[0]
+            if movie.get("poster_path"):
+                result["poster"] = "https://image.tmdb.org/t/p/w500" + movie["poster_path"]
+            if movie.get("id"):
+                result["source_url"] = f"https://www.themoviedb.org/movie/{movie['id']}"
+    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
+        pass
     return result
 
 
 # --------------------------------------------------
-# 9. 관객수 상위 5편 그래프와 마우스 오버 상세 정보
+# 9. 관객수 상위 5편 그래프와 마우스 오버 포스터
 # --------------------------------------------------
 st.divider()
 st.header("📊 관객수 상위 5편")
-st.caption(
-    "막대에 마우스를 올리면 영화 포스터와 TMDB에 등록된 감상평을 확인할 수 있습니다."
-)
+st.caption("막대에 마우스를 올리면 영화 포스터를 확인할 수 있습니다.")
 
 top5 = df.nlargest(5, "관객수").copy().sort_values("관객수", ascending=True)
-
 tmdb_key = get_secret("TMDB_KEY")
-naver_client_id = get_secret("NAVER_CLIENT_ID")
-naver_client_secret = get_secret("NAVER_CLIENT_SECRET")
 movie_extras = {}
 
 if not tmdb_key:
-    st.info(
-        "포스터를 가져오려면 Secrets에 TMDB_KEY를 등록해 주세요. "
-        "TMDB 리뷰가 없을 때 네이버 리뷰 검색을 사용하려면 "
-        "NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET도 등록해야 합니다."
-    )
-elif not (naver_client_id and naver_client_secret):
-    st.info(
-        "TMDB에 감상평이 없으면 네이버 블로그 검색으로 보완할 수 있습니다. "
-        "이를 사용하려면 Secrets에 NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET을 추가해 주세요."
-    )
+    st.info("영화 포스터를 표시하려면 Streamlit Cloud의 Secrets에 TMDB_KEY를 등록해 주세요.")
 
-with st.spinner("상위 5편의 포스터와 감상평을 확인하는 중입니다..."):
+with st.spinner("상위 5편의 포스터를 확인하는 중입니다..."):
     for _, movie in top5.iterrows():
         name = str(movie["원본영화명"])
-        movie_extras[name] = get_movie_extras(
-            name,
-            str(movie["개봉일"]),
-            tmdb_key,
-            naver_client_id,
-            naver_client_secret,
-        )
+        movie_extras[name] = get_movie_poster(name, str(movie["개봉일"]), tmdb_key)
 
-# 마우스 오버 팝업에서 쓸 영화별 데이터를 준비합니다.
 hover_details = []
 for _, movie in top5.iterrows():
     name = str(movie["원본영화명"])
@@ -368,38 +307,25 @@ for _, movie in top5.iterrows():
         "name": name,
         "audience": int(movie["관객수"]),
         "poster": extra.get("poster", ""),
-        "review": extra.get("review", ""),
-        "author": extra.get("review_author", ""),
-        "review_url": extra.get("review_url", ""),
-        "review_source": extra.get("review_source", ""),
         "source_url": extra.get("source_url", "https://www.themoviedb.org/"),
     })
 
-# Plotly의 일반 툴팁은 이미지/긴 감상평을 안정적으로 보여주기 어렵기 때문에
-# HTML 컴포넌트 안에서 그래프의 hover 이벤트를 받아 상세 팝업을 표시합니다.
-# JSON 문자열의 </script> 형태가 HTML 태그로 해석되지 않도록 이스케이프합니다.
 chart_payload = json.dumps(hover_details, ensure_ascii=False).replace("</", "<\\/")
 chart_html = r"""
 <div id="chart-wrap" style="font-family:Arial,sans-serif;position:relative;width:100%;">
   <div id="audience-chart" style="width:100%;height:430px;"></div>
   <div id="movie-card" style="
       display:none; position:absolute; z-index:20; top:12px; right:12px;
-      width:min(310px, 48%); max-height:390px; overflow:auto;
-      background:#ffffff; color:#222; border:1px solid #ddd; border-radius:12px;
-      box-shadow:0 5px 22px rgba(0,0,0,.20); padding:12px; box-sizing:border-box;">
-    <div id="movie-title" style="font-size:16px;font-weight:700;margin-bottom:8px;"></div>
+      width:min(280px, 44%); max-height:350px; overflow:auto;
+      background:#202638; color:#f5f6fb; border:1px solid #46516f; border-radius:14px;
+      box-shadow:0 8px 28px rgba(0,0,0,.35); padding:13px; box-sizing:border-box;">
+    <div id="movie-title" style="font-size:16px;font-weight:700;margin-bottom:10px;"></div>
     <img id="movie-poster" alt="영화 포스터" style="
-      display:none; width:auto; max-width:100%; max-height:180px;
-      object-fit:contain; border-radius:6px; margin:0 auto 10px;">
-    <div id="movie-review-label" style="font-weight:700;margin:7px 0 4px;">감상평</div>
-    <div id="movie-review-source" style="font-size:11px;color:#666;margin-bottom:5px;"></div>
-    <div id="movie-review" style="font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;"></div>
-    <div id="movie-author" style="font-size:12px;color:#666;margin-top:7px;"></div>
-    <a id="movie-review-link" href="#" target="_blank" rel="noopener noreferrer"
-       style="display:none;font-size:12px;margin-top:8px;color:#1769aa;">원문 보기 ↗</a>
-    <div id="movie-source-note" style="font-size:11px;color:#777;margin-top:8px;">
-      포스터: TMDB · 감상평: TMDB 또는 네이버 블로그 검색 결과 요약
-    </div>
+      display:none; width:auto; max-width:100%; max-height:245px;
+      object-fit:contain; border-radius:7px; margin:0 auto 10px;">
+    <div id="movie-poster-note" style="font-size:12px;color:#c5cada;margin-top:4px;">포스터 제공: TMDB</div>
+    <a id="movie-source-link" href="#" target="_blank" rel="noopener noreferrer"
+       style="display:none;font-size:12px;margin-top:8px;color:#a9c9ff;">TMDB 영화 정보 보기 ↗</a>
   </div>
 </div>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
@@ -407,84 +333,40 @@ chart_html = r"""
 const details = __DETAILS__;
 const names = details.map(d => d.name);
 const counts = details.map(d => d.audience);
-
 const trace = {
-  type: "bar",
-  orientation: "h",
-  x: counts,
-  y: names,
-  customdata: details.map(d => [d.name, d.audience]),
-  marker: {color: "#4C78A8"},
+  type: "bar", orientation: "h", x: counts, y: names,
+  marker: {color: "#8ca8f5", line: {color: "#c0ceff", width: 1}},
   text: counts.map(n => n.toLocaleString("ko-KR") + "명"),
-  textposition: "outside",
-  cliponaxis: false,
+  textposition: "outside", cliponaxis: false,
   hovertemplate: "<b>%{y}</b><br>관객수: %{x:,}명<extra></extra>"
 };
-
 const layout = {
   margin: {l: 12, r: 65, t: 20, b: 55},
-  xaxis: {title: "관객수(명)", rangemode: "tozero", separatethousands: true},
-  yaxis: {title: "", automargin: true},
-  showlegend: false,
-  paper_bgcolor: "rgba(0,0,0,0)",
-  plot_bgcolor: "rgba(0,0,0,0)",
-  font: {family: "Arial, sans-serif", size: 12}
+  xaxis: {title: "관객수(명)", rangemode: "tozero", separatethousands: true,
+          gridcolor: "rgba(190,200,230,.14)", zerolinecolor: "rgba(190,200,230,.2)", color: "#dce2f4"},
+  yaxis: {title: "", automargin: true, color: "#e5e9f6"},
+  showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+  font: {family: "Arial, sans-serif", size: 12, color: "#e5e9f6"}
 };
-
-Plotly.newPlot("audience-chart", [trace], layout, {
-  responsive: true,
-  displayModeBar: false
-}).then(gd => {
+Plotly.newPlot("audience-chart", [trace], layout, {responsive:true, displayModeBar:false}).then(gd => {
   const card = document.getElementById("movie-card");
   const title = document.getElementById("movie-title");
   const poster = document.getElementById("movie-poster");
-  const review = document.getElementById("movie-review");
-  const author = document.getElementById("movie-author");
-  const reviewSource = document.getElementById("movie-review-source");
-  const link = document.getElementById("movie-review-link");
-
+  const link = document.getElementById("movie-source-link");
   gd.on("plotly_hover", eventData => {
     if (!eventData || !eventData.points || !eventData.points.length) return;
-    const point = eventData.points[0];
-    const movieName = point.y;
-    const item = details.find(d => d.name === movieName);
+    const item = details.find(d => d.name === eventData.points[0].y);
     if (!item) return;
-
     title.textContent = item.name + " · " + item.audience.toLocaleString("ko-KR") + "명";
-    poster.style.display = "none";
-    poster.removeAttribute("src");
-
+    poster.style.display = "none"; poster.removeAttribute("src");
     if (item.poster) {
       poster.src = item.poster;
       poster.onload = () => { poster.style.display = "block"; };
       poster.onerror = () => { poster.style.display = "none"; };
     }
-
-    if (item.review) {
-      review.textContent = "“" + item.review + "”";
-      author.textContent = item.author ? "— " + item.author : "";
-      reviewSource.textContent = item.review_source || "감상평 검색 결과";
-    } else {
-      review.textContent = "TMDB와 네이버에서 표시할 수 있는 감상평을 찾지 못했습니다.";
-      author.textContent = "";
-      reviewSource.textContent = "";
-    }
-
-    if (item.review_url) {
-      link.href = item.review_url;
-      link.textContent = "감상평 원문 보기 ↗";
-      link.style.display = "inline-block";
-    } else {
-      link.href = item.source_url || "https://www.themoviedb.org/";
-      link.style.display = "inline-block";
-      link.textContent = "영화 정보 보기 ↗";
-    }
+    link.href = item.source_url || "https://www.themoviedb.org/";
+    link.style.display = "inline-block";
     card.style.display = "block";
-  });
-
-  gd.on("plotly_unhover", () => {
-    // 포인터가 막대에서 잠깐 벗어나도 사용자가 팝업을 읽을 수 있도록
-    // 자동으로 닫지 않습니다. 다른 막대에 올리면 내용이 갱신됩니다.
   });
 });
 </script>
@@ -536,4 +418,4 @@ with st.expander("추가 정보: 상영횟수와 순위 변동"):
     extra_df["상영횟수"] = extra_df["상영횟수"].map(format_number)
     st.dataframe(extra_df, use_container_width=True, hide_index=True)
 
-st.caption("박스오피스 자료: 영화진흥위원회(KOBIS) · 포스터: TMDB · 감상평: TMDB 또는 네이버 블로그 검색 결과")
+st.caption("박스오피스 자료: 영화진흥위원회(KOBIS) · 포스터: TMDB")
